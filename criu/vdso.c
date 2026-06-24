@@ -200,9 +200,15 @@ static int check_if_vma_is_vdso(enum vdso_check_t vcheck, int pagemap_fd, struct
 	if ((vma->e->prot & VDSO_PROT) != VDSO_PROT)
 		return 0;
 
+	if (vma->guarded.first) {
+		pr_debug("Skip vDSO mark probe on a guarded range %" PRIx64 "-%" PRIx64 "\n",
+			 vma->e->start, vma->e->start + PAGE_SIZE);
+		goto guard_skip;
+	}
+
 	args->start = vma->e->start;
 	args->len = vma_area_len(vma);
-	args->try_fill_symtable = (vcheck == VDSO_CHECK_SYMS);
+	args->try_fill_symtable = (vcheck == VDSO_CHECK_SYMS && !vma->guarded.any);
 	args->is_vdso = false;
 
 	if (compel_rpc_call_sync(PARASITE_CMD_CHECK_VDSO_MARK, ctl)) {
@@ -220,6 +226,12 @@ static int check_if_vma_is_vdso(enum vdso_check_t vcheck, int pagemap_fd, struct
 		addr->orig_vvar = args->orig_vvar_addr;
 		addr->rt_vvar = args->rt_vvar_addr;
 		return 0;
+	}
+
+	if (unlikely(vcheck == VDSO_CHECK_SYMS && vma->guarded.any)) {
+		pr_debug("Skip vDSO symtable probe on a guarded range %" PRIx64 "-%" PRIx64 "\n",
+			 vma->e->start, vma->e->start + PAGE_SIZE);
+		goto guard_skip;
 	}
 
 	if (vcheck == VDSO_NO_CHECK)
@@ -245,6 +257,14 @@ static int check_if_vma_is_vdso(enum vdso_check_t vcheck, int pagemap_fd, struct
 	}
 
 	return 0;
+
+guard_skip:
+	if (unlikely(vma_area_is(vma, VMA_AREA_VDSO))) {
+		pr_err("Unverifiable vDSO status on a guarded range %" PRIx64 "-%" PRIx64 "\n",
+		       vma->e->start, vma->e->end);
+		return -1;
+	}
+	return 0;
 }
 
 /*
@@ -264,7 +284,7 @@ int parasite_fixup_vdso(struct parasite_ctl *ctl, pid_t pid, struct vm_area_list
 	};
 	enum vdso_check_t vcheck;
 	struct vma_area *vma;
-	int fd = -1;
+	int fd = -1, ret = -1;
 
 	/* vDSO is not provided by kernel */
 	if (kdat.vdso_sym.vdso_size == VDSO_BAD_SIZE)
@@ -287,16 +307,16 @@ int parasite_fixup_vdso(struct parasite_ctl *ctl, pid_t pid, struct vm_area_list
 		 * all vmas and restore potentially remapped vDSO
 		 * area status.
 		 */
-		if (check_if_vma_is_vdso(vcheck, fd, ctl, vma, &rt_vdso_marked, &addr)) {
-			close_safe(&fd);
-			return -1;
-		}
+		if (check_if_vma_is_vdso(vcheck, fd, ctl, vma, &rt_vdso_marked, &addr))
+			goto out;
 	}
 
 	drop_rt_vdso(vma_area_list, &addr, rt_vdso_marked);
+	ret = 0;
 
+out:
 	close_safe(&fd);
-	return 0;
+	return ret;
 }
 
 static int vdso_parse_maps(pid_t pid, struct vdso_maps *s)
