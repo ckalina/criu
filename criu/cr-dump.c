@@ -137,14 +137,14 @@ int collect_mappings(pid_t pid, struct vm_area_list *vma_area_list, dump_filemap
 	 * them as mappings in CRIU and reuse the same VMA images but with only
 	 * VMA_AREA_GUARD flag set.
 	 *
-	 * Also, we don't need to dump them during pre-dump.
+	 * Pre-dump still needs these transient fake VMAs for in-memory walkers
+	 * that must not touch guard pages, but VMA_GUARD images are written
+	 * only during the final dump.
 	 */
-	if (dump_file) {
-		ret = collect_madv_guards(pid, vma_area_list);
-		if (ret < 0) {
-			pr_err("Collect MADV_GUARD_INSTALL pages (pid: %d) failed with %d\n", pid, ret);
-			goto err;
-		}
+	ret = collect_madv_guards(pid, vma_area_list);
+	if (ret < 0) {
+		pr_err("Collect MADV_GUARD_INSTALL pages (pid: %d) failed with %d\n", pid, ret);
+		goto err;
 	}
 
 	pr_info("Collected, longest area occupies %lu pages\n", vma_area_list->nr_priv_pages_longest);
@@ -1510,7 +1510,7 @@ static int pre_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 	parasite_ctl = parasite_infect_seized(pid, item, &vmas);
 	if (!parasite_ctl) {
 		pr_err("Can't infect (pid: %d) with parasite\n", pid);
-		goto err_free;
+		goto err;
 	}
 
 	ret = parasite_fixup_vdso(parasite_ctl, pid, &vmas);
@@ -1544,15 +1544,14 @@ static int pre_dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie
 
 	if (compel_cure_remote(parasite_ctl))
 		pr_err("Can't cure (pid: %d) from parasite\n", pid);
-err_free:
-	free_mappings(&vmas);
 err:
+	free_mappings(&vmas);
 	return ret;
 
 err_cure:
 	if (compel_cure(parasite_ctl))
 		pr_err("Can't cure (pid: %d) from parasite\n", pid);
-	goto err_free;
+	goto err;
 }
 
 static int dump_one_task(struct pstree_item *item, InventoryEntry *parent_ie)
