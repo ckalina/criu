@@ -50,6 +50,7 @@ prev_line = None
 uuid = uuid.uuid4()
 
 NON_ROOT_UID = 65534
+NON_FATAL_FAULT_MIN = 127
 
 
 def alarm(*args):
@@ -2201,7 +2202,12 @@ class Launcher:
               'tls', 'criu_bin', 'crit_bin', 'pre_dump_mode', 'image_io_mode', 'mntns_compat_mode',
               'rootless', 'preload_libfault', 'mocked_cuda_checkpoint',
               'pycriu_search_path')
-        arg = repr((name, desc, flavor, {d: self.__opts[d] for d in nd}))
+
+        test_opts = dict(self.__opts)
+        if desc.get('fault') and not test_opts['fault']:
+            test_opts['fault'] = str(desc['fault'])
+
+        arg = repr((name, desc, flavor, {d: test_opts[d] for d in nd}))
 
         if self.__use_log:
             logf = name.replace('/', '_') + ".log"
@@ -2539,6 +2545,19 @@ def run_tests(opts):
                 launcher.skip(t, "arch %s" % tdesc['arch'])
                 continue
 
+            if (tdesc.get('fault') is not None and
+                    int(tdesc['fault']) < NON_FATAL_FAULT_MIN):
+                raise ValueError("%s: fault %s is fatal" %
+                                 (t + '.desc', tdesc['fault']))
+
+            if opts['fault'] and str(tdesc.get('fault', opts['fault'])) != opts['fault']:
+                launcher.skip(t, "does not support fault override")
+                continue
+
+            if tdesc.get('fault') is not None and opts['rpc']:
+                launcher.skip(t, "does not support fault override with rpc")
+                continue
+
             if test_flag(tdesc, 'reqrst') and opts['norst']:
                 launcher.skip(t, "restore stage is required")
                 continue
@@ -2650,6 +2669,8 @@ class group:
         if self.__desc.get('opts') != desc.get('opts'):
             return False
         if self.__desc.get('feature') != desc.get('feature'):
+            return False
+        if self.__desc.get('fault') != desc.get('fault'):
             return False
         return True
 
