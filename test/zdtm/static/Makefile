@@ -159,6 +159,7 @@ TST_NOFILE	:=				\
 		maps11				\
 		maps13				\
 		maps13-sym			\
+		maps13-inject			\
 		mlock_setuid			\
 		xids00				\
 		groups				\
