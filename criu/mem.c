@@ -1637,7 +1637,7 @@ int collect_madv_guards(pid_t pid, struct vm_area_list *vma_area_list)
 		.start = 0,
 		.end = kdat.task_size,
 		.walk_end = 0,
-		.vec_len = 1000, /* this should be enough for most cases */
+		.vec_len = 1000, /* larger vectors reduce continuation calls */
 		.max_pages = 0,
 		.category_mask = PAGE_IS_GUARD,
 		.return_mask = PAGE_IS_GUARD,
@@ -1657,18 +1657,44 @@ int collect_madv_guards(pid_t pid, struct vm_area_list *vma_area_list)
 
 	nr_vmas = vma_area_list->nr;
 	do {
-		/* start from where we finished the last time */
-		args.start = args.walk_end;
+		u64 next_start, raw_walk_end, scan_start;
+
+		scan_start = args.walk_end;
+		args.start = scan_start;
 		regs_len = ioctl(pagemap_fd, PAGEMAP_SCAN, &args);
 		if (regs_len == -1) {
 			pr_perror("PAGEMAP_SCAN");
 			goto out;
 		}
 
+		raw_walk_end = args.walk_end;
+		if (unlikely(raw_walk_end < scan_start || raw_walk_end > args.end)) {
+			pr_err("PAGEMAP_SCAN returned invalid walk_end: start=%" PRIx64
+			       " walk_end=%" PRIx64 " end=%" PRIx64 "\n",
+			       scan_start, raw_walk_end, args.end);
+			goto out;
+		}
+
+		next_start = raw_walk_end;
 		for (i = 0; i < regs_len; i++) {
 			struct vma_area *vma;
 
 			BUG_ON(!(regs[i].categories & PAGE_IS_GUARD));
+
+			if (unlikely(have_guard && regs[i].start < last_guard_start)) {
+				pr_err("PAGEMAP_SCAN returned unordered guard ranges: "
+				       "previous=%" PRIx64 " current=%" PRIx64 "\n",
+				       last_guard_start, regs[i].start);
+				goto out;
+			}
+
+			/*
+			 * walk_end can remain at an internal kernel-buffer
+			 * boundary even though this ioctl returned later ranges.
+			 * Never rescan an address represented by the result vector.
+			 */
+			if (regs[i].end > next_start)
+				next_start = regs[i].end;
 
 			vma = alloc_vma_area();
 			if (!vma)
@@ -1678,13 +1704,6 @@ int collect_madv_guards(pid_t pid, struct vm_area_list *vma_area_list)
 			vma->e->end = regs[i].end;
 			vma->e->status = VMA_AREA_GUARD;
 
-			if (unlikely(have_guard && regs[i].start < last_guard_start)) {
-				pr_err("PAGEMAP_SCAN returned unordered guard ranges: "
-				      "previous=%" PRIx64 " current=%" PRIx64 "\n",
-				      last_guard_start, regs[i].start);
-				goto out;
-			}
-
 			last_guard_start = regs[i].start;
 			have_guard = true;
 			if (!first_guard)
@@ -1693,7 +1712,17 @@ int collect_madv_guards(pid_t pid, struct vm_area_list *vma_area_list)
 			list_add_tail(&vma->list, &vma_area_list->h);
 			vma_area_list->nr++;
 		}
-	} while (args.walk_end != kdat.task_size);
+
+		if (unlikely(next_start <= scan_start || next_start > args.end)) {
+			pr_err("PAGEMAP_SCAN made invalid progress: start=%" PRIx64
+			       " raw_walk_end=%" PRIx64 " next_start=%" PRIx64
+			       " end=%" PRIx64 "\n",
+			       scan_start, raw_walk_end, next_start, args.end);
+			goto out;
+		}
+
+		args.walk_end = next_start;
+	} while (args.walk_end != args.end);
 
 	mark_madv_guards(vma_area_list, nr_vmas, first_guard);
 
