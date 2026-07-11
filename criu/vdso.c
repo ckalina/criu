@@ -18,6 +18,7 @@
 #include "vdso.h"
 #include "util.h"
 #include "criu-log.h"
+#include "fault-injection.h"
 #include "mem.h"
 #include "vma.h"
 #include <compel/plugins/std/syscall.h>
@@ -56,6 +57,11 @@ static enum vdso_check_t get_vdso_check_type(struct parasite_ctl *ctl)
 	if (!compel_mode_native(ctl)) {
 		pr_info("Don't check vdso for compat task\n");
 		return VDSO_NO_CHECK;
+	}
+
+	if (unlikely(fault_injected(FI_FORCE_VDSO_SYMTABLE))) {
+		pr_info("fault: force vdso symtable check\n");
+		return VDSO_CHECK_SYMS;
 	}
 
 	if (kdat.vdso_hint_reliable) {
