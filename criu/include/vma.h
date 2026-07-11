@@ -37,6 +37,11 @@ struct vma_area {
 		struct /* for dump */ {
 			int vm_socket_id;
 
+			struct {
+				unsigned first : 1;
+				unsigned any : 1;
+			} guarded __attribute__((packed));
+
 			char *aufs_rpath; /* path from aufs root */
 			char *aufs_fpath; /* full path from global root */
 

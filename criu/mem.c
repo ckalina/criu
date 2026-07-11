@@ -1580,12 +1580,56 @@ int prepare_vmas(struct pstree_item *t, struct task_restore_args *ta)
 	return prepare_vma_ios(t, ta);
 }
 
+static void mark_madv_guards(struct vm_area_list *vma_area_list,
+			     unsigned nr_vmas,
+			     struct vma_area *first_guard)
+{
+	struct list_head *head = &vma_area_list->h;
+	struct list_head *guard_pos;
+	struct list_head *vma_pos = head->next;
+	unsigned i;
+
+	if (!first_guard)
+		return;
+
+	guard_pos = &first_guard->list;
+
+	for (i = 0; i < nr_vmas; i++, vma_pos = vma_pos->next) {
+		struct vma_area *vma, *guard;
+
+		BUG_ON(vma_pos == head);
+		vma = list_entry(vma_pos, struct vma_area, list);
+		BUG_ON(vma_area_is(vma, VMA_AREA_GUARD));
+
+		for (; guard_pos != head; guard_pos = guard_pos->next) {
+			guard = list_entry(guard_pos, struct vma_area, list);
+			BUG_ON(!vma_area_is(guard, VMA_AREA_GUARD));
+			if (vma->e->start < guard->e->end)
+				break;
+		}
+
+		if (guard_pos == head)
+			break;
+
+		if (vma->e->end <= guard->e->start)
+			continue;
+
+		vma->guarded.any = 1;
+		if (guard->e->start <= vma->e->start)
+			vma->guarded.first = 1;
+	}
+}
+
 int collect_madv_guards(pid_t pid, struct vm_area_list *vma_area_list)
 {
 	int pagemap_fd = -1;
 	struct page_region *regs = NULL;
+	struct vma_area *first_guard = NULL;
 	long regs_len = 0;
 	int i, ret = -1;
+	unsigned nr_vmas;
+	u64 last_guard_start = 0;
+	bool have_guard = false;
 
 	struct pm_scan_arg args = {
 		.size = sizeof(struct pm_scan_arg),
@@ -1599,10 +1643,8 @@ int collect_madv_guards(pid_t pid, struct vm_area_list *vma_area_list)
 		.return_mask = PAGE_IS_GUARD,
 	};
 
-	if (!kdat.has_pagemap_scan_guard_pages) {
-		ret = 0;
-		goto out;
-	}
+	if (!kdat.has_pagemap_scan_guard_pages)
+		return 0;
 
 	pagemap_fd = open_proc(pid, "pagemap");
 	if (pagemap_fd < 0)
@@ -1613,6 +1655,7 @@ int collect_madv_guards(pid_t pid, struct vm_area_list *vma_area_list)
 		goto out;
 	args.vec = (long)regs;
 
+	nr_vmas = vma_area_list->nr;
 	do {
 		/* start from where we finished the last time */
 		args.start = args.walk_end;
@@ -1635,10 +1678,24 @@ int collect_madv_guards(pid_t pid, struct vm_area_list *vma_area_list)
 			vma->e->end = regs[i].end;
 			vma->e->status = VMA_AREA_GUARD;
 
+			if (unlikely(have_guard && regs[i].start < last_guard_start)) {
+				pr_err("PAGEMAP_SCAN returned unordered guard ranges: "
+				      "previous=%" PRIx64 " current=%" PRIx64 "\n",
+				      last_guard_start, regs[i].start);
+				goto out;
+			}
+
+			last_guard_start = regs[i].start;
+			have_guard = true;
+			if (!first_guard)
+				first_guard = vma;
+
 			list_add_tail(&vma->list, &vma_area_list->h);
 			vma_area_list->nr++;
 		}
 	} while (args.walk_end != kdat.task_size);
+
+	mark_madv_guards(vma_area_list, nr_vmas, first_guard);
 
 	ret = 0;
 
