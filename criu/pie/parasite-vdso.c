@@ -270,6 +270,27 @@ static int add_vdso_proxy(VmaEntry *vma_vdso, VmaEntry *vma_vvar, struct vdso_sy
 	return 0;
 }
 
+static int restore_marked_vdso_header(VmaEntry *vma_vdso, struct vdso_maps *rt)
+{
+	struct vdso_mark *mark = (void *)(uintptr_t)vma_vdso->start;
+
+	if (!is_vdso_mark(mark))
+		return 0;
+	if (mark->version != VDSO_MARK_CUR_VERSION) {
+		pr_err("Mark version mismatch\n");
+		return -1;
+	}
+
+	/*
+	 * A marked runtime vDSO is retained in an image when a guard prevents
+	 * the old proxy pair from being collapsed at dump time. Restore the ELF
+	 * prefix from the fresh runtime vDSO before parsing the retained one.
+	 * Image mappings are still writable at this point in restore.
+	 */
+	memcpy(mark, (void *)rt->vdso_start, sizeof(*mark));
+	return 0;
+}
+
 int vdso_proxify(struct vdso_maps *rt, bool *added_proxy, VmaEntry *vmas, size_t nr_vmas, bool compat_vdso,
 		 bool force_trampolines)
 {
@@ -315,6 +336,8 @@ int vdso_proxify(struct vdso_maps *rt, bool *added_proxy, VmaEntry *vmas, size_t
 	 * it must never ever be greater in size.
 	 */
 	BUILD_BUG_ON(sizeof(struct vdso_mark) > sizeof(Elf64_Phdr));
+	if (restore_marked_vdso_header(vma_vdso, rt))
+		return -1;
 
 	/*
 	 * Find symbols in vDSO zone read from image.
